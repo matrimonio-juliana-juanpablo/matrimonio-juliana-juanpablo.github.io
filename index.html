@@ -52,6 +52,72 @@ async function registerInvitationOpen() {
   pixel.src = TRACKING_ENDPOINT + '?' + params.toString();
 }
 
+// Medición invisible de atención a las seis fotos principales.
+// Solo mide mientras la pestaña está activa, la foto ocupa >= 50 % de su área
+// visible y hubo actividad reciente. No usa GPS ni identifica personas.
+(function photoAttentionTracker(){
+  if (!/^\d{1,4}$/.test(groupId || '')) return;
+  const photoPaths = [
+    '01-mirandose-pasillo.jpg', '02-abrazados-balcon.jpg',
+    '03-levantandola-patio.jpg', '04-baile-balcon.jpeg',
+    '05-baile-corredor.jpg', '06-caminando-mano-v14.jpg'
+  ];
+  const photos = photoPaths.map(name => [...document.querySelectorAll('#main img')]
+    .find(img => img.getAttribute('src')?.split('?')[0].endsWith('/'+name)));
+  if (photos.some(p => !p)) return;
+  let browserId = '';
+  try { browserId = localStorage.getItem('jjp_browser_id') || ''; } catch(e) {}
+  if (!/^[a-zA-Z0-9_-]{8,100}$/.test(browserId)) {
+    browserId = (crypto.randomUUID ? crypto.randomUUID() : 'browser-'+Date.now()+'-'+Math.random().toString(36).slice(2));
+    try { localStorage.setItem('jjp_browser_id', browserId); } catch(e) {}
+  }
+  const visible = Array(6).fill(false), pending = Array(6).fill(0);
+  const seen = Array(6).fill(false);
+  let lastActivity = Date.now(), lastTick = Date.now(), started = false;
+  ['scroll','touchstart','pointerdown','keydown'].forEach(evt =>
+    window.addEventListener(evt, () => { lastActivity=Date.now(); }, {passive:true}));
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      const i = photos.indexOf(entry.target);
+      if (i >= 0) visible[i] = entry.intersectionRatio >= 0.5;
+    });
+  }, {threshold:[0,0.5,1]});
+  photos.forEach(img => observer.observe(img));
+  function flush(){
+    if (!started) return;
+    for (let i=0;i<6;i++) {
+      const seconds = Math.floor(pending[i]);
+      if (!seconds && !seen[i]) continue;
+      pending[i] -= seconds;
+      const params = new URLSearchParams({
+        evento:'foto', g:groupId, dispositivo:browserId,
+        foto:String(i+1), segundos:String(seconds), vista:seen[i]?'1':'0'
+      });
+      seen[i] = false;
+      // GET de imagen para evitar CORS; no modifica el diseño.
+      const pixel = new Image();
+      pixel.src = TRACKING_ENDPOINT+'?'+params.toString();
+    }
+  }
+  document.getElementById('open').addEventListener('click',()=>{
+    started = true; lastActivity = Date.now(); lastTick = Date.now();
+  });
+  setInterval(()=>{
+    const now=Date.now(), elapsed=Math.min((now-lastTick)/1000, 2);
+    lastTick=now;
+    if (!started || document.hidden || Date.now()-lastActivity>20000) return;
+    visible.forEach((v,i)=>{
+      if (v) { pending[i]+=elapsed; seen[i]=true; }
+    });
+    if (pending.some(v=>v>=8)) flush();
+  },1000);
+  document.addEventListener('visibilitychange',()=>{
+    lastTick=Date.now();
+    if(document.hidden) flush();
+  });
+  window.addEventListener('pagehide',flush);
+})();
+
 document.getElementById('open').addEventListener('click',()=>{
   registerInvitationOpen();
   wantsMusic=true;
