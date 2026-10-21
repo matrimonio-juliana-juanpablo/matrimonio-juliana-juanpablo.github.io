@@ -17,11 +17,11 @@ async function startMusic(){
   try {await audio.play()}catch(e) { /* A browser may require another tap. */ }
   updateMusicButton();
 }
-// Seguimiento de aperturas por grupo y navegador (sin geolocalización).
+// Seguimiento de aperturas por grupo, navegador y ubicación aproximada por IP.
 const TRACKING_ENDPOINT = 'https://script.google.com/a/macros/hoklan.com/s/AKfycbzqktdJHq9GN1eBJ6wmVjZtXbLVSiXEQfqBIIiiVEutLt_Af1E4Bs8DuCiEeJROKLrvYw/exec'; // URL del despliegue Apps Script /exec
 const groupId = new URLSearchParams(location.search).get('g');
 async function registerInvitationOpen() {
-  if (!TRACKING_ENDPOINT || !/^\\d{1,4}$/.test(groupId || '')) return;
+  if (!TRACKING_ENDPOINT || !/^\d{1,4}$/.test(groupId || '')) return;
   let browserId = '';
   try {
     browserId = localStorage.getItem('jjp_browser_id') || '';
