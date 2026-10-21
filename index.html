@@ -52,70 +52,100 @@ async function registerInvitationOpen() {
   pixel.src = TRACKING_ENDPOINT + '?' + params.toString();
 }
 
-// Medición invisible de atención a las seis fotos principales.
-// Solo mide mientras la pestaña está activa, la foto ocupa >= 50 % de su área
-// visible y hubo actividad reciente. No usa GPS ni identifica personas.
+// Estadísticas invisibles de las seis fotografías: tiempo visible en pantalla activa.
 (function photoAttentionTracker(){
-  if (!/^\d{1,4}$/.test(groupId || '')) return;
-  const photoPaths = [
-    '01-mirandose-pasillo.jpg', '02-abrazados-balcon.jpg',
-    '03-levantandola-patio.jpg', '04-baile-balcon.jpeg',
-    '05-baile-corredor.jpg', '06-caminando-mano-v14.jpg'
-  ];
-  const photos = photoPaths.map(name => [...document.querySelectorAll('#main img')]
-    .find(img => img.getAttribute('src')?.split('?')[0].endsWith('/'+name)));
+  if (!/^\d{1,4}$/.test(groupId || '') || !TRACKING_ENDPOINT) return;
+  const photoPaths = ['01-mirandose-pasillo.jpg','02-abrazados-balcon.jpg',
+    '03-levantandola-patio.jpg','04-baile-balcon.jpeg',
+    '05-baile-corredor.jpg','06-caminando-mano-v14.jpg'];
+  const photos = photoPaths.map(name => Array.from(document.querySelectorAll('#main img'))
+    .find(img => (img.getAttribute('src') || '').split('?')[0].endsWith('/'+name)));
   if (photos.some(p => !p)) return;
   let browserId = '';
   try { browserId = localStorage.getItem('jjp_browser_id') || ''; } catch(e) {}
   if (!/^[a-zA-Z0-9_-]{8,100}$/.test(browserId)) {
-    browserId = (crypto.randomUUID ? crypto.randomUUID() : 'browser-'+Date.now()+'-'+Math.random().toString(36).slice(2));
-    try { localStorage.setItem('jjp_browser_id', browserId); } catch(e) {}
+    browserId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() :
+      'browser-'+Date.now()+'-'+Math.random().toString(36).slice(2);
+    try { localStorage.setItem('jjp_browser_id',browserId); } catch(e) {}
   }
-  const visible = Array(6).fill(false), pending = Array(6).fill(0);
-  const seen = Array(6).fill(false);
-  let lastActivity = Date.now(), lastTick = Date.now(), started = false;
-  ['scroll','touchstart','pointerdown','keydown'].forEach(evt =>
-    window.addEventListener(evt, () => { lastActivity=Date.now(); }, {passive:true}));
-  const observer = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      const i = photos.indexOf(entry.target);
-      if (i >= 0) visible[i] = entry.intersectionRatio >= 0.5;
+  const pending=Array(6).fill(0), seen=Array(6).fill(false);
+  let started=false, lastTick=performance.now(), lastActivity=Date.now();
+  const activePixels = img => {
+    const r=img.getBoundingClientRect();
+    return Math.max(0,Math.min(r.bottom,innerHeight)-Math.max(r.top,0));
+  };
+  ['scroll','touchstart','pointerdown','keydown'].forEach(event =>
+    window.addEventListener(event,()=>{lastActivity=Date.now()},{passive:true}));
+  // Con fotos verticales basta que ocupen una porción relevante de la pantalla.
+  function tick(){
+    const now=performance.now(), elapsed=Math.min((now-lastTick)/1000,2);
+    lastTick=now;
+    if (!started || document.hidden || Date.now()-lastActivity>30000) return;
+    const threshold=Math.min(130,innerHeight*0.22);
+    photos.forEach((img,i)=>{
+      if(activePixels(img)>=threshold){pending[i]+=elapsed;seen[i]=true;}
     });
-  }, {threshold:[0,0.5,1]});
-  photos.forEach(img => observer.observe(img));
+    if(pending.some(v=>v>=5)) flush();
+  }
+  const inflight=[];
   function flush(){
-    if (!started) return;
-    for (let i=0;i<6;i++) {
-      const seconds = Math.floor(pending[i]);
-      if (!seconds && !seen[i]) continue;
-      pending[i] -= seconds;
-      const params = new URLSearchParams({
-        evento:'foto', g:groupId, dispositivo:browserId,
-        foto:String(i+1), segundos:String(seconds), vista:seen[i]?'1':'0'
-      });
-      seen[i] = false;
-      // GET de imagen para evitar CORS; no modifica el diseño.
-      const pixel = new Image();
-      pixel.src = TRACKING_ENDPOINT+'?'+params.toString();
+    if(!started) return;
+    for(let i=0;i<6;i++){
+      const seconds=Math.floor(pending[i]);
+      if(!seconds && !seen[i]) continue;
+      pending[i]=Math.max(0,pending[i]-seconds);
+      const params=new URLSearchParams({evento:'foto',g:groupId,
+        dispositivo:browserId,foto:String(i+1),segundos:String(seconds),
+        vista:seen[i]?'1':'0'});
+      seen[i]=false;
+      const pixel=new Image();
+      inflight.push(pixel);
+      const release=()=>{const j=inflight.indexOf(pixel);if(j>=0)inflight.splice(j,1);};
+      pixel.onload=release;pixel.onerror=release;
+      pixel.src=TRACKING_ENDPOINT+'?'+params.toString();
     }
   }
+  // Zoom con dos dedos: un evento por gesto, solo cuando comienza sobre una fotografía.
+  // No contamos el desplazamiento ni prometemos detectar zoom gestionado por el navegador.
+  let gesture=null;
+  function photoAt(target){
+    const img=target && target.closest ? target.closest('img') : null;
+    return photos.indexOf(img);
+  }
+  function distance(touches){
+    const a=touches[0],b=touches[1];
+    return Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+  }
+  function sendZoom(i){
+    const params=new URLSearchParams({evento:'zoom',g:groupId,
+      dispositivo:browserId,foto:String(i+1)});
+    const pixel=new Image();inflight.push(pixel);
+    const release=()=>{const j=inflight.indexOf(pixel);if(j>=0)inflight.splice(j,1);};
+    pixel.onload=release;pixel.onerror=release;
+    pixel.src=TRACKING_ENDPOINT+'?'+params.toString();
+  }
+  document.addEventListener('touchstart',e=>{
+    if(!started || e.touches.length!==2){if(e.touches.length<2)gesture=null;return;}
+    const i=photoAt(e.target);
+    const j=photoAt(document.elementFromPoint(e.touches[1].clientX,e.touches[1].clientY));
+    gesture=i>=0 && i===j ? {i,initial:distance(e.touches),sent:false} : null;
+  },{passive:true});
+  document.addEventListener('touchmove',e=>{
+    if(!gesture || e.touches.length!==2 || gesture.sent)return;
+    if(distance(e.touches)>gesture.initial*1.12 && distance(e.touches)-gesture.initial>18){
+      gesture.sent=true;sendZoom(gesture.i);
+    }
+  },{passive:true});
+  document.addEventListener('touchend',e=>{if(e.touches.length<2)gesture=null;},{passive:true});
+  document.addEventListener('touchcancel',()=>{gesture=null;},{passive:true});
   document.getElementById('open').addEventListener('click',()=>{
-    started = true; lastActivity = Date.now(); lastTick = Date.now();
+    started=true;lastTick=performance.now();lastActivity=Date.now();
   });
-  setInterval(()=>{
-    const now=Date.now(), elapsed=Math.min((now-lastTick)/1000, 2);
-    lastTick=now;
-    if (!started || document.hidden || Date.now()-lastActivity>20000) return;
-    visible.forEach((v,i)=>{
-      if (v) { pending[i]+=elapsed; seen[i]=true; }
-    });
-    if (pending.some(v=>v>=8)) flush();
-  },1000);
+  setInterval(tick,1000);
   document.addEventListener('visibilitychange',()=>{
-    lastTick=Date.now();
-    if(document.hidden) flush();
+    tick();if(document.hidden)flush();lastTick=performance.now();
   });
-  window.addEventListener('pagehide',flush);
+  window.addEventListener('pagehide',()=>{tick();flush();});
 })();
 
 document.getElementById('open').addEventListener('click',()=>{
