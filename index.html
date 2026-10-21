@@ -20,37 +20,56 @@ async function startMusic(){
 // Seguimiento de aperturas por grupo, navegador y ubicación aproximada por IP.
 const TRACKING_ENDPOINT = 'https://script.google.com/a/macros/hoklan.com/s/AKfycbzqktdJHq9GN1eBJ6wmVjZtXbLVSiXEQfqBIIiiVEutLt_Af1E4Bs8DuCiEeJROKLrvYw/exec'; // URL del despliegue Apps Script /exec
 const groupId = new URLSearchParams(location.search).get('g');
-async function registerInvitationOpen() {
-  if (!TRACKING_ENDPOINT || !/^\d{1,4}$/.test(groupId || '')) return;
-  let browserId = '';
-  try {
-    browserId = localStorage.getItem('jjp_browser_id') || '';
-    if (!browserId) {
-      browserId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
-      localStorage.setItem('jjp_browser_id', browserId);
-    }
-  } catch (e) { browserId = 'anon-' + Math.random().toString(36).slice(2); }
-  const params = new URLSearchParams({g:groupId, evento:'apertura', dispositivo:browserId});
-  // ipwho.is estima la ciudad a partir de la IP pública, sin solicitar GPS.
-  // La IP se procesa en el servicio externo, pero NO se envía a Google Sheets.
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
-    try {
-      const response = await fetch('https://ipwho.is/', {signal: controller.signal});
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success !== false) {
-          for (const [key, value] of [['ciudad',data.city],['region',data.region],['pais',data.country]]) {
-            if (typeof value === 'string') params.set(key, value.slice(0, 80));
-          }
-        }
-      }
-    } finally { clearTimeout(timeout); }
-  } catch (e) { /* Si falla la ubicación, conservar el registro de apertura. */ }
+// Mantener las solicitudes de medición hasta que terminen.
+const trackingPixels = new Set();
+function sendTracking(params) {
   const pixel = new Image();
+  trackingPixels.add(pixel);
+  const release = () => trackingPixels.delete(pixel);
+  pixel.onload = release;
+  pixel.onerror = release;
   pixel.src = TRACKING_ENDPOINT + '?' + params.toString();
 }
+function trackingBrowserId() {
+  let id = '';
+  try { id = localStorage.getItem('jjp_browser_id') || ''; } catch(e) {}
+  if (!/^[a-zA-Z0-9_-]{8,100}$/.test(id)) {
+    id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() :
+      'browser-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    try { localStorage.setItem('jjp_browser_id', id); } catch(e) {}
+  }
+  return id;
+}
+function registerInvitationOpen() {
+  if (!TRACKING_ENDPOINT || !/^\d{1,4}$/.test(groupId || '')) return;
+  const browserId = trackingBrowserId();
+  const visitId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() :
+    'visit-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  // Apertura inmediata, independiente de servicios externos de geolocalización.
+  sendTracking(new URLSearchParams({g:groupId, evento:'apertura',
+    dispositivo:browserId, visita:visitId}));
+  // La ubicación es opcional; si falla, la apertura permanece registrada.
+  (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      let response;
+      try { response = await fetch('https://ipwho.is/', {signal:controller.signal}); }
+      finally { clearTimeout(timeout); }
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.success === false || !data.city && !data.region && !data.country) return;
+      const params = new URLSearchParams({g:groupId, evento:'ubicacion',
+        dispositivo:browserId, visita:visitId});
+      for (const [key,value] of [['ciudad',data.city],['region',data.region],['pais',data.country]]) {
+        if (typeof value === 'string') params.set(key,value.slice(0,80));
+      }
+      sendTracking(params);
+    } catch(e) { /* No interrumpir la invitación ni la apertura. */ }
+  })();
+}
+// Registrar al cargar la página, sin exigir que la persona pulse «Abrir».
+registerInvitationOpen();
 
 // Estadísticas invisibles de las seis fotografías: tiempo visible en pantalla activa.
 (function photoAttentionTracker(){
@@ -149,7 +168,6 @@ async function registerInvitationOpen() {
 })();
 
 document.getElementById('open').addEventListener('click',()=>{
-  registerInvitationOpen();
   wantsMusic=true;
   audio.load();
   startMusic();
